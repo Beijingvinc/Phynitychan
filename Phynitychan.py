@@ -1,0 +1,812 @@
+import os
+import json
+import time
+import random
+from datetime import datetime
+from flask import Flask, request, render_template_string, redirect, url_for, session, abort
+
+app = Flask(__name__)
+app.secret_key = 'phynitychan_ultimate_2026_edition'
+app.config['UPLOAD_FOLDER'] = os.path.join('data', 'src')
+
+# ---- DATA LAYER MANAGEMENT ----
+DATA_DIR = 'data'
+BOARDS_FILE = os.path.join(DATA_DIR, 'boards.json')
+USERS_FILE = os.path.join(DATA_DIR, 'users.json')
+SETTINGS_FILE = os.path.join(DATA_DIR, 'global_settings.json')
+
+for path in [DATA_DIR, app.config['UPLOAD_FOLDER']]:
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+def load_json(filepath, default):
+    if not os.path.exists(filepath):
+        with open(filepath, 'w') as f:
+            json.dump(default, f, indent=4)
+        return default
+    with open(filepath, 'r') as f:
+        return json.load(f)
+
+def save_json(filepath, data):
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=4)
+
+# ---- MULTILINGUAL TRANSLATION SYSTEM ----
+LANGUAGES = {
+    "en": {
+        "home": "Home", "user_panel": "User Panel / Registration", "admin": "Global Admin",
+        "welcome": "Welcome to Phynitychan!", "desc": "Create your own imageboard or textboard instantly.",
+        "active_boards": "Active Boards Across the Network", "board_type": "Board Type",
+        "created_by": "Created by", "login_reg": "Login / Register", "username": "Username",
+        "password": "Password", "btn_login": "Login", "btn_register": "Register",
+        "create_new_board": "Create a New Board", "board_uri_placeholder": "uri (e.g., tech)",
+        "board_title_placeholder": "Board Title", "btn_create": "Create Board", "my_boards": "My Managed Boards",
+        "manage": "Manage", "banned_msg": "You are BANNED.", "name": "Name", "subject": "Subject",
+        "message": "Message", "file": "File", "btn_submit_thread": "Submit Thread", "btn_reply": "Reply",
+        "back_to_board": "Back to Board", "global_notice": "Global Notice", "site_name": "Site Name",
+        "max_size": "Max File Size", "save_settings": "Save Settings", "delete_board": "Delete Board",
+        "global_bans": "Global Ban List", "ban_btn": "Ban", "delete_btn": "Delete", "anonymous": "Anonymous",
+        "new_thread": "New thread", "all_threads": "All threads", "back_to_index": "Back to index"
+    },
+    "es": {
+        "home": "Inicio", "user_panel": "Panel de Usuario", "admin": "Admin Global",
+        "welcome": "¡Bienvenido a Phynitychan!", "desc": "Crea tu propio tablón de imágenes o texto al instante.",
+        "active_boards": "Tablones Activos en la Red", "board_type": "Tipo de Tablón",
+        "created_by": "Creado por", "login_reg": "Acceso / Registro", "username": "Usuario",
+        "password": "Contraseña", "btn_login": "Entrar", "btn_register": "Registrarse",
+        "create_new_board": "Crear un Nuevo Tablón", "board_uri_placeholder": "uri (ej: ciber)",
+        "board_title_placeholder": "Título del Tablón", "btn_create": "Crear Tablón", "my_boards": "Mis Tablones",
+        "manage": "Moderar", "banned_msg": "Estás BANEADO.", "name": "Nombre", "subject": "Tema",
+        "message": "Mensaje", "file": "Archivo", "btn_submit_thread": "Enviar Hilo", "btn_reply": "Responder",
+        "back_to_board": "Volver al Tablón", "global_notice": "Anuncio Global", "site_name": "Nombre del Sitio",
+        "max_size": "Tamaño Máximo", "save_settings": "Guardar Ajustes", "delete_board": "Eliminar Tablón",
+        "global_bans": "Lista de Baneos Globales", "ban_btn": "Banear", "delete_btn": "Borrar", "anonymous": "Anónimo",
+        "new_thread": "Nuevo hilo", "all_threads": "Todos los hilos", "back_to_index": "Volver al índice"
+    }
+}
+
+DEFAULT_SETTINGS = {
+    "site_name": "Phynitychan",
+    "global_notice": "Welcome to the custom imageboard & textboard platform!",
+    "max_file_size_mb": 50,
+    "global_bans": [],
+    "language": "en"
+}
+global_config = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+app.config['MAX_CONTENT_LENGTH'] = global_config.get("max_file_size_mb", 50) * 1024 * 1024
+
+def t(key):
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    lang = cfg.get("language", "en")
+    return LANGUAGES.get(lang, LANGUAGES["en"]).get(key, key)
+
+# ---- THE INTEGRATED THEME ENGINE AND BASE STRUCTURE ----
+BASE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ settings.site_name }}</title>
+    
+    {% if not is_textboard %}
+    <!-- ================= CORRECCIÓN CSS RADICAL ESTILO YOTSUBA (image_f6a7b2.png) ================= -->
+    <style>
+        body.default-img-body { background-color: #FFFFEE; color: #800000; font-family: arial,helvetica,sans-serif; font-size: 10pt; margin: 0; padding: 10px; text-align: left; }
+        .top-bar { font-size: 9pt; font-family: sans-serif; text-align: left; margin-bottom: 5px; color: #800000; }
+        .top-bar a, .navbar-boards a { color: #34345C; text-decoration: none; font-weight: bold; }
+        .top-bar a:hover, .navbar-boards a:hover { color: #ff0000; }
+        .navbar-boards { text-align: center; font-size: 9pt; font-family: sans-serif; margin-bottom: 15px; border-bottom: 1px dashed #D9BFB7; padding-bottom: 8px; width: 100%; }
+        .global-notice { background-color: #F0E0D6; border: 1px solid #E04000; max-width: 800px; margin: 10px auto; padding: 8px; text-align: center; font-size: 10pt; font-weight: bold; color: #800000; }
+        
+        /* Cajas especiales fijadas para index que no rompen el flujo izquierdo de los tablones */
+        .box { background-color: #F0E0D6; border: 1px solid #D9BFB7; max-width: 800px; margin: 15px auto; padding: 10px; text-align: center; font-family: sans-serif; color: #800000; }
+        .box-title { background-color: #E04000; color: white; font-weight: bold; padding: 4px; margin: -10px -10px 10px -10px; font-size: 11pt; }
+        
+        table.post-form { margin: 10px auto !important; background-color: #D6FAF7; border: 1px solid #B7C5D9; border-collapse: collapse; text-align: left; }
+        table.post-form td { padding: 4px; border: 1px solid #B7C5D9; text-align: left; color: #000; }
+        .form-label { background-color: #E04000; color: white; font-weight: bold; font-size: 9pt; width: 90px; padding: 5px; }
+        
+        /* Flujo nativo de hilos e imágenes alineado a la izquierda */
+        .thread { margin-top: 15px; text-align: left !important; clear: both; display: block; width: 100%; }
+        .op-post { margin-bottom: 8px; display: block; text-align: left !important; width: 100%; }
+        .file-meta { font-size: 8pt; color: #444; margin-bottom: 2px; }
+        .file-meta a { color: #34345C; }
+        
+        /* Respuestas idénticas a image_f6a7b2.png: Bloques cerrados compactos alineados a la izquierda */
+        .reply-container { clear: both; display: block; text-align: left !important; width: 100%; margin: 4px 0; }
+        .reply-post { background-color: #F0E0D6; border: 1px solid #D9BFB7; display: table !important; padding: 6px 10px; margin: 0 0 0 20px !important; text-align: left !important; box-sizing: border-box; }
+        
+        .post-info { font-size: 9pt; color: #444; margin-bottom: 3px; text-align: left !important; }
+        .subject { color: #0F0C5D; font-weight: bold; }
+        .poster-name { color: #117743; font-weight: bold; }
+        .post-message { font-size: 10pt; word-wrap: break-word; white-space: pre-line; margin-top: 4px; color: #800000; text-align: left !important; font-family: arial,helvetica,sans-serif; }
+        
+        /* Enlaces de redirección interna tipo >>557014 */
+        .backlink { color: #ff0000; text-decoration: underline; font-size: 9pt; }
+        
+        .thumb { float: left; margin: 2px 20px 10px 2px; max-width: 150px; max-height: 150px; }
+        .mod-actions { background-color: #F8D7DA; padding: 2px 5px; font-size: 8pt; border: 1px solid #F5C6CB; margin-left: 10px; display: inline-block; color: #000; }
+    </style>
+    {% else %}
+    <!-- ================= STYLE ÚNICO PARA TEXTBOARDS (KAREHA) ================= -->
+    <style>
+        .top-bar { background-color: transparent; padding: 5px; font-size: 9pt; font-family: sans-serif; }
+        .navbar-boards { text-align: center; font-size: 9pt; font-family: sans-serif; margin-bottom: 15px; padding-bottom: 8px; }
+        html { padding: 0px; margin: 0px; }
+        body { padding: 8px; margin: 0px; }
+        body.mainpage { background: #C5AD99; background-image: url(https://parts.jbbs.shitaraba.net/skin/0000/ba.gif); color: #000080; }
+        body.threadpage { background: #EFEFEF; color: #000000; }
+        body.backlogpage { background: #FFFFFF; color: #000000; }
+        a { color: #0000FF; text-decoration: none; }
+        a:visited { color: #660099; }
+        a:hover { color: #FF0000; }
+        form { margin: 0px; }
+        .replytext { margin: 0.5em 0em 0em 3em; line-height: 1.2; }
+        .outerbox { background: #CCFFCC; border: 1px outset white; padding: 7px; margin-bottom: 1em; margin-left: 2.5%; margin-right: 2.5%; clear: both; }
+        .innerbox { border: 1px inset white; padding: 6px; }
+        #titlebox h1 { font-size: 1.5em; font-weight: normal; padding: 0px; margin: 0px; }
+        #titlebox { position: relative; }
+        #titlebox .threadnavigation { position: absolute; right: 2.5%; padding-right: 20px; top: 12px; }
+        body.threadpage #threads, body.mainpage #threads { margin-left: 2.5%; margin-right: 2.5%; background: #CCFFCC; padding: 7px; margin-bottom: 2em; border: 1px outset white; clear: both; }
+        body.threadpage #threadlist { background: #CCFFCC; font-family: serif; margin: 0px 0px 7px 0px; padding: 6px; border-left: 1px inset white; border-right: 1px inset white; border-bottom: 1px inset white; }
+        .mainpage #posts .thread { margin-left: 2.5%; margin-right: 2.5%; position: relative; background: #EFEFEF; border: 1px outset white; padding: 7px; margin-bottom: 2em; clear: both; }
+        .mainpage #posts h2 { color: #FF0000; font-size: 1.5em; font-weight: bold; margin: 0px 0px -1px 0px; padding: 1em 0em 0em 0.3em; border-top: 1px inset white; border-left: 1px inset white; border-right: 1px inset white; }
+        .threadpage #posts h2 { color: red; font-size: 1.2em; font-weight: normal; border-top: 2px ridge white; margin: 1em 0 0 0; padding: 0em 0em 0.5em 0em; }
+        #posts .reply { clear: both; margin: 0px 0px 0.5em 0px; }
+        #posts h3 { font-size: 1em; font-weight: normal; margin: 0px; padding: 0px; }
+        .mainpage #posts h3 .postername { color: red; font-weight: bold; }
+        .threadpage #posts h3 .postername { color: green; font-weight: bold; }
+        #posts form { clear: both; background: #EFEFEF; font-family: serif; margin: 0; }
+        .mainpage #posts form { padding: 6px 6px 1em 6px; border-left: 1px inset white; border-right: 1px inset white; border-bottom: 1px inset white; }
+        #footer { text-align: center; font-size: 0.8em; }
+    </style>
+    {% endif %}
+    {% if current_board_css %}<style>{{ current_board_css | safe }}</style>{% endif %}
+</head>
+<body class="{% if is_textboard %}{{ textboard_class }}{% else %}default-img-body{% endif %}">
+    <div class="top-bar">
+        [<a href="/">{{ trans('home') }}</a>] [<a href="/login">{{ trans('user_panel') }}</a>]
+    </div>
+    <div class="navbar-boards">
+        {% for b_uri, b_meta in boards.items() %}
+            /<a href="/board/{{ b_uri }}">{{ b_uri }}</a>/ - 
+        {% endfor %}
+    </div>
+
+    {% if settings.global_notice and not is_textboard %}
+    <div class="global-notice">{{ settings.global_notice }}</div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+</body>
+</html>
+"""
+
+# ---- CAPTCHA & BAN HELPERS ----
+def check_banned(uri=None):
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    ip = request.remote_addr
+    if ip in cfg.get("global_bans", []):
+        abort(403, description=t('banned_msg') + f" IP: {ip}")
+    if uri:
+        boards = load_json(BOARDS_FILE, {})
+        if uri in boards and ip in boards[uri].get("bans", []):
+            abort(403, description=t('banned_msg') + f" IP: {ip}")
+
+def get_captcha():
+    n1, n2 = random.randint(1, 9), random.randint(1, 9)
+    session['captcha_ans'] = n1 + n2
+    return f"{n1} + {n2}"
+
+# ---- ROUTES SYSTEM ----
+@app.route('/')
+def home():
+    check_banned()
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    
+    html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="box" style="margin-top: 30px;">
+        <div class="box-title">∞ {{ settings.site_name }}</div>
+        <p>{{ trans('desc') }}</p>
+    </div>
+    <div class="box">
+        <div class="box-title">{{ trans('active_boards') }}</div>
+        <ul style="text-align: left; display: inline-block; line-height: 1.8; list-style-type: square; margin: 10px;">
+        {% for uri, data in boards.items() %}
+            <li>
+                <a href="/board/{{ uri }}" style="font-size: 11pt; font-weight: bold;">/{{ uri }}/ - {{ data.title }}</a> 
+                <span style="font-size:9pt; color:#555;">[{{ data.type | upper }}] ({{ trans('created_by') }}: <b>{{ data.owner }}</b>)</span>
+            </li>
+        {% endfor %}
+        </ul>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(html, boards=boards, settings=cfg, trans=t, is_textboard=False)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    check_banned()
+    users = load_json(USERS_FILE, {})
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    error = None
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        username = request.form.get('username').strip()
+        password = request.form.get('password')
+
+        if action == 'register':
+            if username in users: error = "User already exists."
+            elif not username or not password: error = "Fields cannot be blank."
+            else:
+                users[username] = password
+                save_json(USERS_FILE, users)
+                session['user'] = username
+                return redirect(url_for('user_panel'))
+        elif action == 'login':
+            if users.get(username) == password:
+                session['user'] = username
+                return redirect(url_for('user_panel'))
+            else: error = "Invalid credentials."
+
+    html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="box" style="max-width: 400px;">
+        <div class="box-title">{{ trans('login_reg') }}</div>
+        {% if error %}<p style="color:red; font-weight:bold;">{{ error }}</p>{% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="{{ trans('username') }}" style="width:80%; margin-bottom:8px;" required><br>
+            <input type="password" name="password" placeholder="{{ trans('password') }}" style="width:80%; margin-bottom:12px;" required><br>
+            <button type="submit" name="action" value="login">{{ trans('btn_login') }}</button>
+            <button type="submit" name="action" value="register">{{ trans('btn_register') }}</button>
+        </form>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(html, boards=boards, error=error, settings=cfg, trans=t, is_textboard=False)
+
+@app.route('/user_panel', methods=['GET', 'POST'])
+def user_panel():
+    if 'user' not in session: return redirect(url_for('login'))
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    username = session['user']
+    error = None
+
+    if request.method == 'POST':
+        board_uri = request.form.get('uri').strip().lower()
+        board_title = request.form.get('title').strip()
+        board_type = request.form.get('type')
+
+        if not board_uri.isalnum():
+            error = "URI must contain only alphanumeric characters."
+        elif board_uri in boards:
+            error = "That board URI is already taken."
+        else:
+            boards[board_uri] = {
+                "title": board_title,
+                "owner": username,
+                "type": board_type,
+                "css": "",
+                "banner_url": "",
+                "bans": [],
+                "threads": []
+            }
+            save_json(BOARDS_FILE, boards)
+
+    html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="box">
+        <div class="box-title">{{ username }}'s Control Station | [<a href="/logout" style="color:white;">Logout</a>]</div>
+        <h3>{{ trans('create_new_board') }}</h3>
+        {% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
+        <form method="POST">
+            <input type="text" name="uri" placeholder="{{ trans('board_uri_placeholder') }}" required>
+            <input type="text" name="title" placeholder="{{ trans('board_title_placeholder') }}" required>
+            <select name="type">
+                <option value="imgboard">Imageboard (Normal)</option>
+                <option value="textboard">Textboard (Kareha Style)</option>
+            </select>
+            <button type="submit">{{ trans('btn_create') }}</button>
+        </form>
+        <hr style="border-color:#D9BFB7; margin:15px 0;">
+        <h3>{{ trans('my_boards') }}</h3>
+        <table style="width:100%; text-align:left; background: #FFFEEF; border: 1px solid #D9BFB7; padding: 10px;">
+        {% for uri, data in boards.items() %}
+            {% if data.owner == username %}
+                <tr>
+                    <td><b>/{{ uri }}/ - {{ data.title }}</b> ({{ data.type }})</td>
+                    <td style="text-align:right;">
+                        [<a href="/board/{{ uri }}">View</a>] 
+                        [<a href="/board/{{ uri }}/manage" style="color:#AF0A0F;">{{ trans('manage') }}</a>]
+                    </td>
+                </tr>
+            {% endif %}
+        {% endfor %}
+        </table>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(html, boards=boards, username=username, error=error, settings=cfg, trans=t, is_textboard=False)
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect(url_for('home'))
+
+@app.route('/board/<uri>/manage', methods=['GET', 'POST'])
+def manage_board(uri):
+    if 'user' not in session: return redirect(url_for('login'))
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    if uri not in boards: return "Not Found", 404
+    board_data = boards[uri]
+    if board_data['owner'] != session['user']: return "Forbidden", 403
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'update_design':
+            board_data['css'] = request.form.get('css')
+            board_data['banner_url'] = request.form.get('banner_url')
+        elif action == 'add_ban':
+            target_ip = request.form.get('ip').strip()
+            if target_ip and target_ip not in board_data['bans']: board_data['bans'].append(target_ip)
+        elif action == 'remove_ban':
+            target_ip = request.form.get('ip').strip()
+            if target_ip in board_data['bans']: board_data['bans'].remove(target_ip)
+        save_json(BOARDS_FILE, boards)
+
+    html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="box">
+        <div class="box-title">Mod Station /{{ uri }}/</div>
+        <p><a href="/user_panel">⬅ Back to Dashboard</a></p>
+        <form method="POST">
+            <input type="hidden" name="action" value="update_design">
+            <h4>Banner URL</h4>
+            <input type="text" name="banner_url" value="{{ board.banner_url }}" style="width:90%;"><br>
+            <h4>Custom CSS Overrides</h4>
+            <textarea name="css" rows="6" style="width:95%; font-family:monospace;">{{ board.css }}</textarea><br><br>
+            <button type="submit">Save Configurations</button>
+        </form>
+        <hr style="border-color:#D9BFB7; margin:20px 0;">
+        <h3>Ban IP on /{{ uri }}/</h3>
+        <form method="POST">
+            <input type="hidden" name="action" value="add_ban"><input type="text" name="ip" required>
+            <button type="submit">Ban IP</button>
+        </form>
+        <ul>
+            {% for ip in board.bans %}
+            <li>{{ ip }} - <form method="POST" style="display:inline;"><input type="hidden" name="action" value="remove_ban"><input type="hidden" name="ip" value="{{ ip }}"><button type="submit">Unban</button></form></li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(html, boards=boards, uri=uri, board=board_data, settings=cfg, trans=t, is_textboard=False)
+
+@app.route('/moderation/action', methods=['POST'])
+def mod_action():
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    uri = request.form.get('uri')
+    thread_id = int(request.form.get('thread_id'))
+    reply_id = request.form.get('reply_id')
+    action_type = request.form.get('type')
+    
+    if uri not in boards: return "Bad Request", 400
+    board_data = boards[uri]
+    if not (session.get('is_global_admin', False) or ('user' in session and board_data['owner'] == session['user'])):
+        return "Unauthorized", 403
+
+    thread = next((t for t in board_data['threads'] if t['id'] == thread_id), None)
+    if thread:
+        if reply_id:
+            reply = next((r for r in thread['replies'] if str(r['id']) == str(reply_id)), None)
+            if reply:
+                if action_type == 'delete': thread['replies'].remove(reply)
+                if action_type == 'ban' and reply.get('ip'):
+                    if session.get('is_global_admin', False): cfg['global_bans'].append(reply['ip'])
+                    else: board_data['bans'].append(reply['ip'])
+        else:
+            if action_type == 'delete': board_data['threads'].remove(thread)
+            if action_type == 'ban' and thread.get('ip'):
+                if session.get('is_global_admin', False): cfg['global_bans'].append(thread['ip'])
+                else: board_data['bans'].append(thread['ip'])
+
+    save_json(BOARDS_FILE, boards)
+    save_json(SETTINGS_FILE, cfg)
+    return redirect(request.referrer or url_for('view_board', uri=uri))
+
+# ---- BOARD RENDERING ENGINE ----
+@app.route('/board/<uri>', methods=['GET', 'POST'])
+def view_board(uri):
+    check_banned(uri)
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    if uri not in boards: return "Not Found", 404
+    board_data = boards[uri]
+    is_textboard = (board_data.get('type') == 'textboard')
+
+    if request.method == 'POST':
+        user_ans = request.form.get('captcha')
+        if not user_ans or int(user_ans) != session.get('captcha_ans'):
+            return "Incorrect Captcha Solution.", 400
+
+        name = request.form.get('name').strip() or t('anonymous')
+        subject = request.form.get('subject').strip() or "Untitled"
+        message = request.form.get('message').strip()
+        
+        filename = None
+        if not is_textboard and 'file' in request.files:
+            file = request.files['file']
+            if file and file.filename != '':
+                filename = f"{int(time.time())}_{file.filename}"
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+
+        new_thread = {
+            "id": int(time.time()),
+            "ip": request.remote_addr,
+            "date": datetime.now().strftime("%m/%d/%Y (%a) %H:%M:%S"),
+            "name": name,
+            "subject": subject,
+            "message": message,
+            "file": filename,
+            "replies": []
+        }
+        board_data['threads'].insert(0, new_thread)
+        save_json(BOARDS_FILE, boards)
+        return redirect(url_for('view_board', uri=uri))
+
+    is_mod = session.get('is_global_admin', False) or ('user' in session and board_data['owner'] == session['user'])
+    captcha_question = get_captcha()
+
+    # IMGBOARD LAYOUT ENGINE (Flujo idéntico a Yotsuba)
+    imgboard_html = """
+    {% extends "base" %}
+    {% block content %}
+    <div style="text-align:center; margin-top:10px; margin-bottom: 15px; clear:both; width:100%;">
+        {% if board.banner_url %}<img src="{{ board.banner_url }}" style="max-width:400px;"><br>{% endif %}
+        <h1 style="color:#800000; font-family:serif; font-size:24pt; margin:5px; font-weight:normal;">/{{ uri }}/ - {{ board.title }}</h1>
+    </div>
+    
+    <form method="POST" enctype="multipart/form-data" style="text-align:center; width:100%; display:block;">
+        <table class="post-form">
+            <tr><td class="form-label">{{ trans('name') }}</td><td><input type="text" name="name" value="Anonymous"></td></tr>
+            <tr><td class="form-label">{{ trans('subject') }}</td><td><input type="text" name="subject" style="width:70%;"> <input type="submit" value="{{ trans('btn_submit_thread') }}"></td></tr>
+            <tr><td class="form-label">{{ trans('message') }}</td><td><textarea name="message" cols="48" rows="4" required></textarea></td></tr>
+            <tr><td class="form-label">{{ trans('file') }}</td><td><input type="file" name="file"></td></tr>
+            <tr><td class="form-label">Solve: {{ captcha }}</td><td><input type="text" name="captcha" size="6" required></td></tr>
+        </table>
+    </form>
+    <hr style="width:100%; border-color:#D9BFB7; margin:15px 0; clear:both;">
+    
+    {% for thread in board.threads %}
+    <div class="thread">
+        <div class="op-post">
+            {% if thread.file %}
+            <div class="file-meta">File: <a target="_blank" href="/data/src/{{ thread.file }}">{{ thread.file }}</a> (Image size details)</div>
+            <a target="_blank" href="/data/src/{{ thread.file }}"><img class="thumb" src="/data/src/{{ thread.file }}"></a>
+            {% endif %}
+            <div class="post-info">
+                <input type="checkbox"> <span class="subject">{{ thread.subject }}</span> <span class="poster-name">{{ thread.name }}</span> {{ thread.date }} No. {{ thread.id }}
+                [<a href="/board/{{ uri }}/thread/{{ thread.id }}">{{ trans('btn_reply') }}</a>]
+                {% if is_mod %}
+                <div class="mod-actions">IP: {{ thread.ip }} | <form method="POST" action="/moderation/action" style="display:inline;"><input type="hidden" name="uri" value="{{ uri }}"><input type="hidden" name="thread_id" value="{{ thread.id }}"><button type="submit" name="type" value="delete">{{ trans('delete_btn') }}</button></form></div>
+                {% endif %}
+            </div>
+            <div class="post-message">{{ thread.message }}</div>
+        </div>
+        
+        {% for reply in thread.replies %}
+        <div class="reply-container">
+            <div class="reply-post">
+                <div class="post-info">
+                    <input type="checkbox"> <span class="poster-name">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}
+                    {% if is_mod %}
+                    <div class="mod-actions">IP: {{ reply.ip }} | <form method="POST" action="/moderation/action" style="display:inline;"><input type="hidden" name="uri" value="{{ uri }}"><input type="hidden" name="thread_id" value="{{ thread.id }}"><input type="hidden" name="reply_id" value="{{ reply.id }}"><button type="submit" name="type" value="delete">{{ trans('delete_btn') }}</button></form></div>
+                    {% endif %}
+                </div>
+                {% if reply.file %}
+                <div class="file-meta">File: <a target="_blank" href="/data/src/{{ reply.file }}">{{ reply.file }}</a></div>
+                <a target="_blank" href="/data/src/{{ reply.file }}"><img src="/data/src/{{ reply.file }}" style="max-width:120px; display:block; margin:4px 0;"></a>
+                {% endif %}
+                <div class="post-message">{{ reply.message }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <hr style="width:100%; border-color:#D9BFB7; margin:15px 0; clear:both;">
+    {% endfor %}
+    {% endblock %}
+    """
+
+    textboard_html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="outerbox" id="titlebox">
+        <div class="innerbox">
+            <h1>{{ board.title }}</h1>
+            <div class="threadnavigation">Pure Text Ecosystem</div>
+        </div>
+    </div>
+    <div id="threads">
+        <div id="threadlist">
+            {% for t_idx in board.threads %}
+                <span class="threadlink"><a href="/board/{{ uri }}/thread/{{ t_idx.id }}">{{ loop.index }}: {{ t_idx.subject }} ({{ t_idx.replies | length + 1 }})</a></span>
+            {% endfor %}
+            <div id="threadlinks"><a href="#createbox">[{{ trans('new_thread') }}]</a></div>
+        </div>
+    </div>
+    <div id="posts">
+    {% for thread in board.threads %}
+        <div class="thread">
+            <h2><a href="/board/{{ uri }}/thread/{{ thread.id }}">{{ thread.subject }}</a></h2>
+            <div class="replies">
+                <div class="reply">
+                    <h3>
+                        <span class="replynum">1</span>
+                        <span class="postername">{{ thread.name }}</span>
+                        {{ thread.date }} ID:{{ thread.id }}
+                    </h3>
+                    <div class="replytext"><div class="aa">{{ thread.message }}</div></div>
+                </div>
+                {% for reply in thread.replies %}
+                <div class="reply">
+                    <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }}</h3>
+                    <div class="replytext"><div class="aa">{{ reply.message }}</div></div>
+                </div>
+                {% endfor %}
+            </div>
+            <form method="POST" action="/board/{{ uri }}/thread/{{ thread.id }}">
+                <input type="text" name="name" size="15" placeholder="{{ trans('name') }}">
+                <input type="submit" value="{{ trans('btn_reply') }}">
+                <span class="postcaptcha"> [ Solve: {{ captcha }} <input type="text" name="captcha" size="4" required> ]</span>
+                <br>
+                <textarea name="message" rows="3" style="width:90%; margin-top:5px;" required></textarea>
+            </form>
+        </div>
+    {% endfor %}
+    </div>
+    <div class="outerbox" id="createbox" style="margin-top:25px;">
+        <div class="innerbox">
+            <h2>New Thread</h2>
+            <form method="POST">
+                <table border="0">
+                    <tr><td>{{ trans('subject') }}:</td><td><input type="text" name="subject" size="40" required></td></tr>
+                    <tr><td>{{ trans('name') }}:</td><td><input type="text" name="name" size="20"></td></tr>
+                    <tr><td valign="top">{{ trans('message') }}:</td><td><textarea name="message" rows="5" cols="50" required></textarea></td></tr>
+                    <tr><td class="threadcaptcha">Solve {{ captcha }}:</td><td><input type="text" name="captcha" size="10" required> <input type="submit" value="Post New Thread"></td></tr>
+                </table>
+            </form>
+        </div>
+    </div>
+    {% endblock %}
+    """
+
+    target_html = textboard_html if is_textboard else imgboard_html
+    return render_template_string(target_html, boards=boards, uri=uri, board=board_data, settings=cfg, trans=t, is_textboard=is_textboard, textboard_class="mainpage", is_mod=is_mod, captcha=captcha_question)
+
+# ---- THREAD VIEW PAGE ENGINE (.threadpage) ----
+@app.route('/board/<uri>/thread/<int:thread_id>', methods=['GET', 'POST'])
+def view_thread(uri, thread_id):
+    check_banned(uri)
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    if uri not in boards: return "Not Found", 404
+    board_data = boards[uri]
+    is_textboard = (board_data.get('type') == 'textboard')
+
+    thread = next((t for t in board_data['threads'] if t['id'] == thread_id), None)
+    if not thread: return "Thread Not Found", 404
+
+    if request.method == 'POST':
+        user_ans = request.form.get('captcha')
+        if not user_ans or int(user_ans) != session.get('captcha_ans'):
+            return "Incorrect Captcha Solution.", 400
+
+        name = request.form.get('name').strip() or t('anonymous')
+        message = request.form.get('message').strip()
+
+        filename = None
+        if not is_textboard and 'file' in request.files:
+            file = request.files['file']
+            if file and file.filename != '':
+                filename = f"{int(time.time())}_{file.filename}"
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+
+        new_reply = {
+            "id": int(time.time()),
+            "ip": request.remote_addr,
+            "date": datetime.now().strftime("%m/%d/%Y (%a) %H:%M:%S"),
+            "name": name,
+            "message": message,
+            "file": filename
+        }
+        thread['replies'].append(new_reply)
+        save_json(BOARDS_FILE, boards)
+        return redirect(url_for('view_thread', uri=uri, thread_id=thread_id))
+
+    captcha_question = get_captcha()
+    is_mod = session.get('is_global_admin', False) or ('user' in session and board_data['owner'] == session['user'])
+
+    imgboard_thread_html = """
+    {% extends "base" %}
+    {% block content %}
+    <div style="margin: 10px 0; text-align: left;"><a href="/board/{{ uri }}">⬅ {{ trans('back_to_board') }}</a></div>
+    <div class="thread">
+        <div class="op-post">
+            {% if thread.file %}
+            <div class="file-meta">File: <a target="_blank" href="/data/src/{{ thread.file }}">{{ thread.file }}</a></div>
+            <a target="_blank" href="/data/src/{{ thread.file }}"><img class="thumb" src="/data/src/{{ thread.file }}"></a>
+            {% endif %}
+            <div class="post-info">
+                <input type="checkbox"> <span class="subject">{{ thread.subject }}</span> <span class="poster-name">{{ thread.name }}</span> {{ thread.date }} No. {{ thread.id }}
+            </div>
+            <div class="post-message">{{ thread.message }}</div>
+        </div>
+
+        {% for reply in thread.replies %}
+        <div class="reply-container">
+            <div class="reply-post">
+                <div class="post-info">
+                    <input type="checkbox"> <span class="poster-name">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}
+                    {% if is_mod %}
+                    <div class="mod-actions">IP: {{ reply.ip }} | <form method="POST" action="/moderation/action" style="display:inline;"><input type="hidden" name="uri" value="{{ uri }}"><input type="hidden" name="thread_id" value="{{ thread.id }}"><input type="hidden" name="reply_id" value="{{ reply.id }}"><button type="submit" name="type" value="delete">{{ trans('delete_btn') }}</button></form></div>
+                    {% endif %}
+                </div>
+                {% if reply.file %}
+                <div class="file-meta">File: <a target="_blank" href="/data/src/{{ reply.file }}">{{ reply.file }}</a></div>
+                <a target="_blank" href="/data/src/{{ reply.file }}"><img src="/data/src/{{ reply.file }}" style="max-width:120px; display:block; margin:4px 0;"></a>
+                {% endif %}
+                <div class="post-message">{{ reply.message }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    <form method="POST" enctype="multipart/form-data" style="margin-top:25px; clear:both; text-align:center; width:100%;">
+        <table class="post-form">
+            <tr><td class="form-label">{{ trans('name') }}</td><td><input type="text" name="name" value="Anonymous"></td></tr>
+            <tr><td class="form-label">{{ trans('message') }}</td><td><textarea name="message" cols="48" rows="4" required></textarea></td></tr>
+            <tr><td class="form-label">{{ trans('file') }}</td><td><input type="file" name="file"></td></tr>
+            <tr><td class="form-label">Solve: {{ captcha }}</td><td><input type="text" name="captcha" size="6" required> <input type="submit" value="{{ trans('btn_reply') }}"></td></tr>
+        </table>
+    </form>
+    {% endblock %}
+    """
+
+    textboard_thread_html = """
+    {% extends "base" %}
+    {% block content %}
+    <div id="threads">
+        <h1>{{ thread.subject }}</h1>
+        <div id="posts">
+            <div class="reply">
+                <h3><span class="replynum">1</span> <span class="postername">{{ thread.name }}</span> {{ thread.date }}</h3>
+                <div class="replytext"><div class="aa">{{ thread.message }}</div></div>
+            </div>
+            {% for reply in thread.replies %}
+            <div class="reply">
+                <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }}</h3>
+                <div class="replytext"><div class="aa">{{ reply.message }}</div></div>
+            </div>
+            {% endfor %}
+            <form method="POST">
+                <table border="0">
+                    <tr><td>{{ trans('name') }}:</td><td><input type="text" name="name" size="25"></td></tr>
+                    <tr><td>{{ trans('message') }}:</td><td><textarea name="message" rows="4" cols="60" required></textarea></td></tr>
+                    <tr><td class="postcaptcha">Solve {{ captcha }}:</td><td><input type="text" name="captcha" size="10" required> <input type="submit" value="{{ trans('btn_reply') }}"></td></tr>
+                </table>
+            </form>
+        </div>
+        <div style="margin-top:15px; padding:5px;"><a href="/board/{{ uri }}">< {{ trans('back_to_index') }}</a></div>
+    </div>
+    {% endblock %}
+    """
+    
+    target_html = textboard_thread_html if is_textboard else imgboard_thread_html
+    return render_template_string(target_html, boards=boards, uri=uri, board=board_data, thread=thread, settings=cfg, trans=t, is_textboard=is_textboard, textboard_class="threadpage", captcha=captcha_question, is_mod=is_mod)
+
+# ---- SECURE CONTROL GATEWAYS ----
+@app.route('/superadmin_gateway', methods=['GET', 'POST'])
+def superadmin_gateway():
+    boards = load_json(BOARDS_FILE, {})
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    error = None
+    if request.method == 'POST':
+        if request.form.get('master_password') == "admin123": ##adminpassword
+            session['is_global_admin'] = True
+            return redirect(url_for('global_admin_panel'))
+        else: error = "Access Denied."
+
+    html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="box" style="background:#222; color:#FFF; max-width:400px; margin-top:50px;">
+        <div class="box-title" style="background:#000;">MASTER CONFIG GATEWAY</div>
+        {% if error %}<p style="color:red; font-weight:bold;">{{ error }}</p>{% endif %}
+        <form method="POST">
+            <input type="password" name="master_password" style="width:80%; text-align:center; margin-bottom:10px;" required><br>
+            <button type="submit">Authenticate</button>
+        </form>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(html, boards=boards, error=error, settings=cfg, trans=t, is_textboard=False)
+
+@app.route('/superadmin_panel', methods=['GET', 'POST'])
+def global_admin_panel():
+    if not session.get('is_global_admin', False): abort(403)
+    cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+    boards = load_json(BOARDS_FILE, {})
+    
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'save_settings':
+            cfg['site_name'] = request.form.get('site_name')
+            cfg['global_notice'] = request.form.get('global_notice')
+            cfg['language'] = request.form.get('language')
+            save_json(SETTINGS_FILE, cfg)
+        elif action == 'delete_board_global':
+            target_uri = request.form.get('target_uri')
+            if target_uri in boards: del boards[target_uri]
+            save_json(BOARDS_FILE, boards)
+        elif action == 'exit_admin':
+            session.pop('is_global_admin', None)
+            return redirect(url_for('home'))
+
+    html = """
+    {% extends "base" %}
+    {% block content %}
+    <div class="box" style="background:#E2E3E5; text-align:left; max-width:850px;">
+        <div class="box-title" style="background:#383D41;">GLOBAL OPERATIONS CONTROL PANEL (ADMIN)</div>
+        <form method="POST">
+            <input type="hidden" name="action" value="save_settings">
+            <h3>1. Localization Options & General Global Settings</h3>
+            <select name="language" style="padding:3px;">
+                <option value="en" {% if cfg.language == 'en' %}selected{% endif %}>English (English)</option>
+                <option value="es" {% if cfg.language == 'es' %}selected{% endif %}>Español (Spanish)</option>
+            </select>
+            <br><br>
+            <label><b>Site Name:</b></label><br><input type="text" name="site_name" value="{{ cfg.site_name }}" style="width:40%;"><br><br>
+            <label><b>Global Banner Notice Text:</b></label><br><textarea name="global_notice" style="width:95%;">{{ cfg.global_notice }}</textarea><br><br>
+            <button type="submit" style="background:green; color:#FFF; padding:5px 10px; border:none; font-weight:bold;">Update Global Configuration</button>
+        </form>
+        <hr style="margin:20px 0;">
+        <h3>2. System Board Purgatory</h3>
+        <form method="POST"><input type="hidden" name="action" value="delete_board_global">
+            <select name="target_uri">
+                {% for uri, data in boards.items() %}
+                    <option value="{{ uri }}">/{{ uri }}/ - {{ data.title }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" style="background:red; color:white; border:none; padding:3px 10px;">Purge Board Data</button>
+        </form>
+        <hr style="margin:20px 0;">
+        <p><form method="POST"><input type="hidden" name="action" value="exit_admin"><button type="submit">Log Out From Terminal</button></form></p>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(html, boards=boards, cfg=cfg, settings=cfg, trans=t, is_textboard=False)
+
+@app.route('/data/src/<filename>')
+def serve_file(filename):
+    from flask import send_from_directory
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@app.before_request
+def setup_templates():
+    import jinja2
+    app.jinja_loader = jinja2.DictLoader({'base': BASE_HTML})
+
+if __name__ == '__main__': ##ip host
+    app.run(host='0.0.0.0', port=5000, debug=True)
