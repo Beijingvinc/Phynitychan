@@ -2,11 +2,12 @@ import os
 import json
 import time
 import random
+import re
 from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, abort
 
 app = Flask(__name__)
-app.secret_key = 'phynitychan_ultimate_2026_edition'
+app.secret_key = 'phynitychan'
 app.config['UPLOAD_FOLDER'] = os.path.join('data', 'src')
 
 # ---- DATA LAYER MANAGEMENT ----
@@ -80,6 +81,35 @@ def t(key):
     lang = cfg.get("language", "en")
     return LANGUAGES.get(lang, LANGUAGES["en"]).get(key, key)
 
+# ----  ----
+def parse_culture_formatting(text):
+    if not text:
+        return ""
+    # 
+    html_escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    lines = html_escaped.split("\n")
+    processed_lines = []
+    
+    for line in lines:
+        # 1. greentext
+        if line.startswith("&gt;&gt;"):
+            line = f'<span class="greentext">{line}</span>'
+        else:
+            
+            line = re.sub(r'(&gt;&gt;[^\n]+)', r'<span class="greentext">\1</span>', line)
+            
+        # 2. Reply
+        # 
+        line = re.sub(r'(?<!&gt;)&gt;(\d+)', r'<a href="#p\1" class="quotelink">&gt;\1</a>', line)
+        
+        processed_lines.append(line)
+        
+    return "<br>".join(processed_lines)
+
+
+app.jinja_env.filters['chan_format'] = parse_culture_formatting
+
 # ---- THE INTEGRATED THEME ENGINE AND BASE STRUCTURE ----
 BASE_HTML = """
 <!DOCTYPE html>
@@ -119,10 +149,12 @@ BASE_HTML = """
         .post-info { font-size: 9pt; color: #444; margin-bottom: 3px; text-align: left !important; }
         .subject { color: #0F0C5D; font-weight: bold; }
         .poster-name { color: #117743; font-weight: bold; }
-        .post-message { font-size: 10pt; word-wrap: break-word; white-space: pre-line; margin-top: 4px; color: #800000; text-align: left !important; font-family: arial,helvetica,sans-serif; }
+        .post-message { font-size: 10pt; word-wrap: break-word; margin-top: 4px; color: #800000; text-align: left !important; font-family: arial,helvetica,sans-serif; }
         
-        /* Enlaces de redirección interna tipo >>557014 */
-        .backlink { color: #ff0000; text-decoration: underline; font-size: 9pt; }
+        /* ESTILOS DE CULTURA AGREGADOS DE PHYNITYCHAN */
+        .greentext { color: #789922 !important; font-family: monospace; font-size: 10.5pt; }
+        .quotelink { color: #DD0000 !important; text-decoration: underline; font-weight: normal; }
+        .quotelink:hover { color: #FF0000 !important; }
         
         .thumb { float: left; margin: 2px 20px 10px 2px; max-width: 150px; max-height: 150px; }
         .mod-actions { background-color: #F8D7DA; padding: 2px 5px; font-size: 8pt; border: 1px solid #F5C6CB; margin-left: 10px; display: inline-block; color: #000; }
@@ -159,6 +191,10 @@ BASE_HTML = """
         #posts form { clear: both; background: #EFEFEF; font-family: serif; margin: 0; }
         .mainpage #posts form { padding: 6px 6px 1em 6px; border-left: 1px inset white; border-right: 1px inset white; border-bottom: 1px inset white; }
         #footer { text-align: center; font-size: 0.8em; }
+        
+        /* ESTILOS COMPATIBLES PARA TEXTBOARD */
+        .greentext { color: #789922 !important; font-family: monospace; }
+        .quotelink { color: #DD0000 !important; text-decoration: underline; }
     </style>
     {% endif %}
     {% if current_board_css %}<style>{{ current_board_css | safe }}</style>{% endif %}
@@ -452,14 +488,16 @@ def view_board(uri):
                 filename = f"{int(time.time())}_{file.filename}"
                 file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
 
+        timestamp_now = int(time.time())
         new_thread = {
-            "id": int(time.time()),
+            "id": timestamp_now,
             "ip": request.remote_addr,
             "date": datetime.now().strftime("%m/%d/%Y (%a) %H:%M:%S"),
             "name": name,
             "subject": subject,
             "message": message,
             "file": filename,
+            "last_bump": timestamp_now, # Guardamos marca de tiempo nativa para la ordenación exacta del bump
             "replies": []
         }
         board_data['threads'].insert(0, new_thread)
@@ -469,7 +507,14 @@ def view_board(uri):
     is_mod = session.get('is_global_admin', False) or ('user' in session and board_data['owner'] == session['user'])
     captcha_question = get_captcha()
 
-    # IMGBOARD LAYOUT ENGINE (Flujo idéntico a Yotsuba)
+    # REGLA COMPLEMENTARIA BUMP: Ordenar hilos en el índice general basándonos en 'last_bump'
+    if 'threads' in board_data:
+        for t_obj in board_data['threads']:
+            if 'last_bump' not in t_obj:
+                t_obj['last_bump'] = t_obj['id'] # Fallback por si hay hilos viejos
+        board_data['threads'] = sorted(board_data['threads'], key=lambda k: k['last_bump'], reverse=True)
+
+    # IMGBOARD LAYOUT ENGINE (Filtro 'chan_format' aplicado a los mensajes)
     imgboard_html = """
     {% extends "base" %}
     {% block content %}
@@ -490,7 +535,7 @@ def view_board(uri):
     <hr style="width:100%; border-color:#D9BFB7; margin:15px 0; clear:both;">
     
     {% for thread in board.threads %}
-    <div class="thread">
+    <div class="thread" id="p{{ thread.id }}">
         <div class="op-post">
             {% if thread.file %}
             <div class="file-meta">File: <a target="_blank" href="/data/src/{{ thread.file }}">{{ thread.file }}</a> (Image size details)</div>
@@ -503,11 +548,11 @@ def view_board(uri):
                 <div class="mod-actions">IP: {{ thread.ip }} | <form method="POST" action="/moderation/action" style="display:inline;"><input type="hidden" name="uri" value="{{ uri }}"><input type="hidden" name="thread_id" value="{{ thread.id }}"><button type="submit" name="type" value="delete">{{ trans('delete_btn') }}</button></form></div>
                 {% endif %}
             </div>
-            <div class="post-message">{{ thread.message }}</div>
+            <div class="post-message">{{ thread.message | chan_format | safe }}</div>
         </div>
         
         {% for reply in thread.replies %}
-        <div class="reply-container">
+        <div class="reply-container" id="p{{ reply.id }}">
             <div class="reply-post">
                 <div class="post-info">
                     <input type="checkbox"> <span class="poster-name">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}
@@ -519,7 +564,7 @@ def view_board(uri):
                 <div class="file-meta">File: <a target="_blank" href="/data/src/{{ reply.file }}">{{ reply.file }}</a></div>
                 <a target="_blank" href="/data/src/{{ reply.file }}"><img src="/data/src/{{ reply.file }}" style="max-width:120px; display:block; margin:4px 0;"></a>
                 {% endif %}
-                <div class="post-message">{{ reply.message }}</div>
+                <div class="post-message">{{ reply.message | chan_format | safe }}</div>
             </div>
         </div>
         {% endfor %}
@@ -548,7 +593,7 @@ def view_board(uri):
     </div>
     <div id="posts">
     {% for thread in board.threads %}
-        <div class="thread">
+        <div class="thread" id="p{{ thread.id }}">
             <h2><a href="/board/{{ uri }}/thread/{{ thread.id }}">{{ thread.subject }}</a></h2>
             <div class="replies">
                 <div class="reply">
@@ -557,12 +602,12 @@ def view_board(uri):
                         <span class="postername">{{ thread.name }}</span>
                         {{ thread.date }} ID:{{ thread.id }}
                     </h3>
-                    <div class="replytext"><div class="aa">{{ thread.message }}</div></div>
+                    <div class="replytext"><div class="aa">{{ thread.message | chan_format | safe }}</div></div>
                 </div>
                 {% for reply in thread.replies %}
-                <div class="reply">
-                    <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }}</h3>
-                    <div class="replytext"><div class="aa">{{ reply.message }}</div></div>
+                <div class="reply" id="p{{ reply.id }}">
+                    <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}</h3>
+                    <div class="replytext"><div class="aa">{{ reply.message | chan_format | safe }}</div></div>
                 </div>
                 {% endfor %}
             </div>
@@ -623,8 +668,9 @@ def view_thread(uri, thread_id):
                 filename = f"{int(time.time())}_{file.filename}"
                 file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
 
+        timestamp_now = int(time.time())
         new_reply = {
-            "id": int(time.time()),
+            "id": timestamp_now,
             "ip": request.remote_addr,
             "date": datetime.now().strftime("%m/%d/%Y (%a) %H:%M:%S"),
             "name": name,
@@ -632,6 +678,11 @@ def view_thread(uri, thread_id):
             "file": filename
         }
         thread['replies'].append(new_reply)
+        
+        # CORRECCIÓN DE BUG: ¡EL BUMP NATIVO!
+        # Actualizamos la marca temporal del hilo padre con el momento exacto de la respuesta para que suba en el índice
+        thread['last_bump'] = timestamp_now
+        
         save_json(BOARDS_FILE, boards)
         return redirect(url_for('view_thread', uri=uri, thread_id=thread_id))
 
@@ -642,7 +693,7 @@ def view_thread(uri, thread_id):
     {% extends "base" %}
     {% block content %}
     <div style="margin: 10px 0; text-align: left;"><a href="/board/{{ uri }}">⬅ {{ trans('back_to_board') }}</a></div>
-    <div class="thread">
+    <div class="thread" id="p{{ thread.id }}">
         <div class="op-post">
             {% if thread.file %}
             <div class="file-meta">File: <a target="_blank" href="/data/src/{{ thread.file }}">{{ thread.file }}</a></div>
@@ -651,11 +702,11 @@ def view_thread(uri, thread_id):
             <div class="post-info">
                 <input type="checkbox"> <span class="subject">{{ thread.subject }}</span> <span class="poster-name">{{ thread.name }}</span> {{ thread.date }} No. {{ thread.id }}
             </div>
-            <div class="post-message">{{ thread.message }}</div>
+            <div class="post-message">{{ thread.message | chan_format | safe }}</div>
         </div>
 
         {% for reply in thread.replies %}
-        <div class="reply-container">
+        <div class="reply-container" id="p{{ reply.id }}">
             <div class="reply-post">
                 <div class="post-info">
                     <input type="checkbox"> <span class="poster-name">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}
@@ -667,7 +718,7 @@ def view_thread(uri, thread_id):
                 <div class="file-meta">File: <a target="_blank" href="/data/src/{{ reply.file }}">{{ reply.file }}</a></div>
                 <a target="_blank" href="/data/src/{{ reply.file }}"><img src="/data/src/{{ reply.file }}" style="max-width:120px; display:block; margin:4px 0;"></a>
                 {% endif %}
-                <div class="post-message">{{ reply.message }}</div>
+                <div class="post-message">{{ reply.message | chan_format | safe }}</div>
             </div>
         </div>
         {% endfor %}
@@ -690,14 +741,14 @@ def view_thread(uri, thread_id):
     <div id="threads">
         <h1>{{ thread.subject }}</h1>
         <div id="posts">
-            <div class="reply">
-                <h3><span class="replynum">1</span> <span class="postername">{{ thread.name }}</span> {{ thread.date }}</h3>
-                <div class="replytext"><div class="aa">{{ thread.message }}</div></div>
+            <div class="reply" id="p{{ thread.id }}">
+                <h3><span class="replynum">1</span> <span class="postername">{{ thread.name }}</span> {{ thread.date }} ID:{{ thread.id }}</h3>
+                <div class="replytext"><div class="aa">{{ thread.message | chan_format | safe }}</div></div>
             </div>
             {% for reply in thread.replies %}
-            <div class="reply">
-                <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }}</h3>
-                <div class="replytext"><div class="aa">{{ reply.message }}</div></div>
+            <div class="reply" id="p{{ reply.id }}">
+                <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}</h3>
+                <div class="replytext"><div class="aa">{{ reply.message | chan_format | safe }}</div></div>
             </div>
             {% endfor %}
             <form method="POST">
@@ -723,7 +774,7 @@ def superadmin_gateway():
     cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
     error = None
     if request.method == 'POST':
-        if request.form.get('master_password') == "admin123": ##adminpassword
+        if request.form.get('master_password') == "Admin123": ##Admin password
             session['is_global_admin'] = True
             return redirect(url_for('global_admin_panel'))
         else: error = "Access Denied."
@@ -808,5 +859,5 @@ def setup_templates():
     import jinja2
     app.jinja_loader = jinja2.DictLoader({'base': BASE_HTML})
 
-if __name__ == '__main__': ##ip host
+if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
