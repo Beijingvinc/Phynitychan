@@ -155,6 +155,12 @@ BASE_HTML = """
         .thumb { float: left; margin: 2px 20px 10px 2px; max-width: 150px; max-height: 150px; }
         .media-reply { max-width: 200px; max-height: 200px; display: block; margin: 4px 0; }
         .mod-actions { background-color: #F8D7DA; padding: 2px 5px; font-size: 8pt; border: 1px solid #F5C6CB; margin-left: 10px; display: inline-block; color: #000; }
+        
+        .omitted-text { font-size: 9pt; color: #707070; margin: 8px 0 8px 20px; font-weight: bold; font-family: sans-serif; }
+        .omitted-text a { color: #FF0000; text-decoration: underline; }
+        .pagination-box { text-align: center; margin: 20px auto; font-family: sans-serif; font-size: 11pt; background: #F0E0D6; border: 1px solid #D9BFB7; padding: 5px; max-width: 600px; }
+        .pagination-box a, .pagination-box span { padding: 2px 6px; margin: 0 2px; border: 1px solid #D9BFB7; background: #FFFFEE; text-decoration: none; color: #800000; }
+        .pagination-box span.current-page { background: #E04000; color: white; font-weight: bold; }
     </style>
     {% else %}
     <style>
@@ -189,6 +195,7 @@ BASE_HTML = """
         #footer { text-align: center; font-size: 0.8em; }
         .greentext { color: #789922 !important; font-family: monospace; }
         .quotelink { color: #DD0000 !important; text-decoration: underline; }
+        .omitted-text-textboard { font-size: 10pt; color: #FF0000; font-weight: bold; margin: 12px 0 12px 3em; font-family: serif; }
     </style>
     {% endif %}
     {% if current_board_css %}<style>{{ current_board_css | safe }}</style>{% endif %}
@@ -329,6 +336,9 @@ def user_panel():
         is_protected = True if request.form.get('is_protected') else False
         board_password = request.form.get('board_password','').strip()
 
+        max_replies_index = int(request.form.get('max_replies_index', 5))
+        max_threads_index = int(request.form.get('max_threads_index', 10))
+
         if not board_uri.isalnum():
             error = "URI must contain only alphanumeric characters."
         elif board_uri in boards:
@@ -344,6 +354,8 @@ def user_panel():
                 "is_secret": is_secret,
                 "is_protected": is_protected,
                 "password": board_password,
+                "max_replies_index": max_replies_index,
+                "max_threads_index": max_threads_index,
                 "bans": [],
                 "threads": []
             }
@@ -363,6 +375,10 @@ def user_panel():
                 <option value="imgboard">Imageboard (Normal)</option>
                 <option value="textboard">Textboard (Kareha Style)</option>
             </select><br><br>
+            
+            <label>Max replies shown on Index: <input type="number" name="max_replies_index" value="5" min="1" style="width:50px;"></label><br>
+            <label>Max threads shown on Index / Per Page: <input type="number" name="max_threads_index" value="10" min="1" style="width:50px;"></label><br><br>
+            
             <label><input type="checkbox" name="is_secret"> {{ trans('secret') }}</label><br>
             <label><input type="checkbox" name="is_protected"> {{ trans('password_protected') }}</label><br>
             <input type="text" name="board_password" placeholder="{{ trans('board_password') }}"><br><br>
@@ -415,6 +431,8 @@ def manage_board(uri):
             board_data['is_secret'] = True if request.form.get('is_secret') else False
             board_data['is_protected'] = True if request.form.get('is_protected') else False
             board_data['password'] = request.form.get('board_password','').strip()
+            board_data['max_replies_index'] = int(request.form.get('max_replies_index', 5))
+            board_data['max_threads_index'] = int(request.form.get('max_threads_index', 10))
         elif action == 'add_ban':
             target_ip = request.form.get('ip').strip()
             if target_ip and target_ip not in board_data['bans']: board_data['bans'].append(target_ip)
@@ -437,6 +455,10 @@ def manage_board(uri):
             <h4>Custom Welcome Notice (Board Exclusive)</h4>
             <textarea name="custom_notice" rows="3" style="width:95%;">{{ board.custom_notice if board.custom_notice is defined else '' }}</textarea><br>
             
+            <h4>Thread & Reply Truncation Limits</h4>
+            <label>Max replies shown per thread on index: <input type="number" name="max_replies_index" value="{{ board.max_replies_index if board.max_replies_index is defined else 5 }}" min="1" style="width:60px;"></label><br>
+            <label>Max active threads displayed on index index: <input type="number" name="max_threads_index" value="{{ board.max_threads_index if board.max_threads_index is defined else 10 }}" min="1" style="width:60px;"></label><br>
+
             <h4>Privacy Options</h4>
             <label><input type="checkbox" name="is_secret" {% if board.is_secret %}checked{% endif %}> Hide board from public index (Secret)</label><br>
             <label><input type="checkbox" name="is_protected" {% if board.is_protected %}checked{% endif %}> Require password authentication to view</label><br>
@@ -508,6 +530,9 @@ def view_board(uri):
 
     is_textboard = (board_data.get('type') == 'textboard')
 
+    max_replies_index = int(board_data.get('max_replies_index', 5))
+    max_threads_index = int(board_data.get('max_threads_index', 10))
+
     if request.method == 'POST':
         user_ans = request.form.get('captcha')
         if not user_ans or int(user_ans) != session.get('captcha_ans'):
@@ -551,6 +576,51 @@ def view_board(uri):
 
     custom_notice = board_data.get('custom_notice') if board_data.get('custom_notice') else None
 
+    total_threads = len(board_data.get('threads', []))
+    current_page = int(request.args.get('page', 0))
+    
+    if is_textboard:
+        visible_threads = board_data['threads'][:max_threads_index]
+        hidden_threads_count = max(0, total_threads - max_threads_index)
+        pages_count = 0
+        current_page_threads = visible_threads
+    else:
+        import math
+        pages_count = max(1, math.ceil(total_threads / max_threads_index))
+        if current_page >= pages_count:
+            current_page = pages_count - 1
+        if current_page < 0:
+            current_page = 0
+            
+        start_idx = current_page * max_threads_index
+        end_idx = start_idx + max_threads_index
+        current_page_threads = board_data['threads'][start_idx:end_idx]
+        hidden_threads_count = 0
+
+    processed_threads = []
+    for thread in current_page_threads:
+        replies = thread.get('replies', [])
+        total_replies = len(replies)
+        
+        if total_replies > max_replies_index:
+            visible_replies = replies[-max_replies_index:]
+            omitted_count = total_replies - max_replies_index
+        else:
+            visible_replies = replies
+            omitted_count = 0
+
+        processed_threads.append({
+            "id": thread['id'],
+            "ip": thread['ip'],
+            "date": thread['date'],
+            "name": thread['name'],
+            "subject": thread['subject'],
+            "message": thread['message'],
+            "file": thread.get('file'),
+            "replies": visible_replies,
+            "omitted_count": omitted_count
+        })
+
     imgboard_html = """
     {% extends "base" %}
     {% block content %}
@@ -589,17 +659,10 @@ def view_board(uri):
                 </tr>
             </table>
         </form>
-        <div class="form-rules-box">
-            <ul>
-                <li>Supported file formats are standard images (JPG, PNG, GIF) and video containers (MP4, WEBM).</li>
-                <li>Maximum configuration payload limit allocated globally per content package request.</li>
-                <li>Hyperlinks are processed contextually and embedded inside raw layout tags dynamically.</li>
-            </ul>
-        </div>
     </div>
     <hr style="width:100%; border-color:#D9BFB7; margin:15px 0; clear:both;">
     
-    {% for thread in board.threads %}
+    {% for thread in processed_threads %}
     <div class="thread" id="p{{ thread.id }}">
         <div class="op-post">
             {% if thread.file %}
@@ -619,6 +682,12 @@ def view_board(uri):
             </div>
             <div class="post-message">{{ thread.message | chan_format | safe }}</div>
         </div>
+        
+        {% if thread.omitted_count > 0 %}
+        <div class="omitted-text">
+            … {{ thread.omitted_count }} posts omitted. Click <a href="/board/{{ uri }}/thread/{{ thread.id }}">Reply</a> to view.
+        </div>
+        {% endif %}
         
         {% for reply in thread.replies %}
         <div class="reply-container" id="p{{ reply.id }}">
@@ -644,6 +713,19 @@ def view_board(uri):
     </div>
     <hr style="width:100%; border-color:#D9BFB7; margin:15px 0; clear:both;">
     {% endfor %}
+
+    {% if pages_count > 1 %}
+    <div class="pagination-box">
+        Pages:
+        {% for p in range(pages_count) %}
+            {% if p == current_page %}
+                <span class="current-page">{{ p }}</span>
+            {% else %}
+                <a href="/board/{{ uri }}?page={{ p }}">{{ p }}</a>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
     {% endblock %}
     """
 
@@ -665,7 +747,7 @@ def view_board(uri):
         </div>
     </div>
     <div id="posts">
-    {% for thread in board.threads %}
+    {% for thread in processed_threads %}
         <div class="thread" id="p{{ thread.id }}">
             <h2><a href="/board/{{ uri }}/thread/{{ thread.id }}">{{ thread.subject }}</a></h2>
             <div class="replies">
@@ -677,6 +759,13 @@ def view_board(uri):
                     </h3>
                     <div class="replytext"><div class="aa">{{ thread.message | chan_format | safe }}</div></div>
                 </div>
+                
+                {% if thread.omitted_count > 0 %}
+                <div class="omitted-text-textboard">
+                    [{{ thread.omitted_count }} posts omitted. Click the thread title to view.]
+                </div>
+                {% endif %}
+
                 {% for reply in thread.replies %}
                 <div class="reply" id="p{{ reply.id }}">
                     <h3><span class="replynum">{{ loop.index + 1 }}</span> <span class="postername">{{ reply.name }}</span> {{ reply.date }} No. {{ reply.id }}</h3>
@@ -693,7 +782,14 @@ def view_board(uri):
             </form>
         </div>
     {% endfor %}
+    
+    {% if hidden_threads_count > 0 %}
+    <div class="outerbox" style="text-align:center; color: #555; font-size:10pt;">
+        ... and {{ hidden_threads_count }} older threads hidden from the front index. Check the master thread list hierarchy links above to view them all.
     </div>
+    {% endif %}
+    </div>
+    
     <div class="outerbox" id="createbox" style="margin-top:25px;">
         <div class="innerbox">
             <h2>New Thread</h2>
@@ -711,7 +807,7 @@ def view_board(uri):
     """
 
     target_html = textboard_html if is_textboard else imgboard_html
-    return render_template_string(target_html, boards=boards, uri=uri, board=board_data, settings=cfg, trans=t, is_textboard=is_textboard, textboard_class="mainpage", is_mod=is_mod, captcha=captcha_question, custom_notice=custom_notice)
+    return render_template_string(target_html, boards=boards, uri=uri, board=board_data, processed_threads=processed_threads, settings=cfg, trans=t, is_textboard=is_textboard, textboard_class="mainpage", is_mod=is_mod, captcha=captcha_question, custom_notice=custom_notice, pages_count=pages_count, current_page=current_page, hidden_threads_count=hidden_threads_count)
 
 @app.route('/board/<uri>/thread/<int:thread_id>', methods=['GET', 'POST'])
 def view_thread(uri, thread_id):
@@ -906,7 +1002,7 @@ def superadmin_gateway():
     cfg = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
     error = None
     if request.method == 'POST':
-        if request.form.get('master_password') == "Admin123": #Change password
+        if request.form.get('master_password') == "Admin123": #change password
             session['is_global_admin'] = True
             return redirect(url_for('global_admin_panel'))
         else: error = "Access Denied."
@@ -992,4 +1088,4 @@ def setup_templates():
     app.jinja_loader = jinja2.DictLoader({'base': BASE_HTML})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80, debug=True)
+    app.run(host='0.0.0.0', port=80, debug=True) #change port if you want
