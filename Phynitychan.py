@@ -7,7 +7,7 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, abort
 
 app = Flask(__name__)
-app.secret_key = 'phynitychan' #change this
+app.secret_key = 'phynitychan' #change secret key
 app.config['UPLOAD_FOLDER'] = os.path.join('data', 'src')
 
 DATA_DIR = 'data'
@@ -85,6 +85,8 @@ def parse_culture_formatting(text):
     if not text:
         return ""
     html_escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    url_pattern = r'(https?://[^\s<>"]+)'
+    html_escaped = re.sub(url_pattern, r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', html_escaped)
     lines = html_escaped.split("\n")
     processed_lines = []
     for line in lines:
@@ -122,9 +124,19 @@ BASE_HTML = """
         .global-notice { background-color: #F0E0D6; border: 1px solid #E04000; max-width: 800px; margin: 10px auto; padding: 8px; text-align: center; font-size: 10pt; font-weight: bold; color: #800000; }
         .box { background-color: #F0E0D6; border: 1px solid #D9BFB7; max-width: 800px; margin: 15px auto; padding: 10px; text-align: center; font-family: sans-serif; color: #800000; }
         .box-title { background-color: #E04000; color: white; font-weight: bold; padding: 4px; margin: -10px -10px 10px -10px; font-size: 11pt; }
-        table.post-form { margin: 10px auto !important; background-color: #D6FAF7; border: 1px solid #B7C5D9; border-collapse: collapse; text-align: left; }
-        table.post-form td { padding: 4px; border: 1px solid #B7C5D9; text-align: left; color: #000; }
-        .form-label { background-color: #E04000; color: white; font-weight: bold; font-size: 9pt; width: 90px; padding: 5px; }
+        
+        table.post-form { margin: 0 auto !important; border-spacing: 1px; border-collapse: separate; background-color: transparent; text-align: left; width: auto; font-family: arial,helvetica,sans-serif; }
+        table.post-form td { padding: 0px; border: none; text-align: left; color: #000; vertical-align: middle; }
+        .form-label { background-color: #E08060; color: #800000; font-weight: bold; font-size: 10pt; width: 85px; padding: 3px 5px !important; border: 1px solid #FFFFEE !important; }
+        .form-value { background-color: #FFFFEE; padding: 2px 4px !important; }
+        .form-value input[type="text"], .form-value textarea { border: 1px solid #A9A9A9; font-family: monospace; font-size: 10pt; padding: 1px; box-sizing: border-box; }
+        .form-value input[type="text"] { width: 324px; height: 22px; }
+        .form-value textarea { width: 485px; height: 90px; resize: both; vertical-align: bottom; }
+        .form-value input[type="submit"] { height: 22px; margin-left: 4px; font-family: sans-serif; font-size: 9pt; background-color: #ECE9D8; border: 1px solid #7F9DB9; color: black; cursor: pointer; padding: 0 6px; }
+        .form-rules-box { max-width: 580px; margin: 6px auto 12px auto; text-align: left; font-size: 8.5pt; color: #555; font-family: sans-serif; line-height: 1.4; padding-left: 10px; }
+        .form-rules-box ul { margin: 0; padding-left: 15px; list-style-type: disc; }
+        .form-rules-box li { margin-bottom: 2px; }
+        
         .thread { margin-top: 15px; text-align: left !important; clear: both; display: block; width: 100%; }
         .op-post { margin-bottom: 8px; display: block; text-align: left !important; width: 100%; }
         .file-meta { font-size: 8pt; color: #444; margin-bottom: 2px; }
@@ -135,6 +147,8 @@ BASE_HTML = """
         .subject { color: #0F0C5D; font-weight: bold; }
         .poster-name { color: #117743; font-weight: bold; }
         .post-message { font-size: 10pt; word-wrap: break-word; margin-top: 4px; color: #800000; text-align: left !important; font-family: arial,helvetica,sans-serif; }
+        .post-message a { color: #34345C; text-decoration: underline; }
+        .post-message a:hover { color: #ff0000; }
         .greentext { color: #789922 !important; font-family: monospace; font-size: 10.5pt; }
         .quotelink { color: #DD0000 !important; text-decoration: underline; font-weight: normal; }
         .quotelink:hover { color: #FF0000 !important; }
@@ -545,15 +559,44 @@ def view_board(uri):
         <h1 style="color:#800000; font-family:serif; font-size:24pt; margin:5px; font-weight:normal;">/{{ uri }}/ - {{ board.title }}</h1>
     </div>
     
-    <form method="POST" enctype="multipart/form-data" style="text-align:center; width:100%; display:block;">
-        <table class="post-form">
-            <tr><td class="form-label">{{ trans('name') }}</td><td><input type="text" name="name" value="Anonymous"></td></tr>
-            <tr><td class="form-label">{{ trans('subject') }}</td><td><input type="text" name="subject" style="width:70%;"> <input type="submit" value="{{ trans('btn_submit_thread') }}"></td></tr>
-            <tr><td class="form-label">{{ trans('message') }}</td><td><textarea name="message" cols="48" rows="4" required></textarea></td></tr>
-            <tr><td class="form-label">{{ trans('file') }}</td><td><input type="file" name="file" accept="image/*,video/*"></td></tr>
-            <tr><td class="form-label">Solve: {{ captcha }}</td><td><input type="text" name="captcha" size="6" required></td></tr>
-        </table>
-    </form>
+    <div style="width: 100%; display: block; margin-bottom: 20px;">
+        <form method="POST" enctype="multipart/form-data">
+            <table class="post-form">
+                <tr>
+                    <td class="form-label">{{ trans('name') }}</td>
+                    <td class="form-value"><input type="text" name="name" value="Anonymous"></td>
+                </tr>
+                <tr>
+                    <td class="form-label">{{ trans('subject') }}</td>
+                    <td class="form-value">
+                        <input type="text" name="subject">
+                        <input type="submit" value="{{ trans('btn_submit_thread') }}">
+                    </td>
+                </tr>
+                <tr>
+                    <td class="form-label">{{ trans('message') }}</td>
+                    <td class="form-value"><textarea name="message" required></textarea></td>
+                </tr>
+                <tr>
+                    <td class="form-label">{{ trans('file') }}</td>
+                    <td class="form-value"><input type="file" name="file" accept="image/*,video/*"></td>
+                </tr>
+                <tr>
+                    <td class="form-label">Verification</td>
+                    <td class="form-value" style="font-size: 9pt; font-family: sans-serif; color: #000;">
+                        Solve: <b>{{ captcha }}</b> = <input type="text" name="captcha" size="5" style="width:50px; height:20px;" required>
+                    </td>
+                </tr>
+            </table>
+        </form>
+        <div class="form-rules-box">
+            <ul>
+                <li>Supported file formats are standard images (JPG, PNG, GIF) and video containers (MP4, WEBM).</li>
+                <li>Maximum configuration payload limit allocated globally per content package request.</li>
+                <li>Hyperlinks are processed contextually and embedded inside raw layout tags dynamically.</li>
+            </ul>
+        </div>
+    </div>
     <hr style="width:100%; border-color:#D9BFB7; margin:15px 0; clear:both;">
     
     {% for thread in board.threads %}
@@ -762,14 +805,33 @@ def view_thread(uri, thread_id):
         {% endfor %}
     </div>
     
-    <form method="POST" enctype="multipart/form-data" style="margin-top:25px; clear:both; text-align:center; width:100%;">
-        <table class="post-form">
-            <tr><td class="form-label">{{ trans('name') }}</td><td><input type="text" name="name" value="Anonymous"></td></tr>
-            <tr><td class="form-label">{{ trans('message') }}</td><td><textarea name="message" cols="48" rows="4" required></textarea></td></tr>
-            <tr><td class="form-label">{{ trans('file') }}</td><td><input type="file" name="file" accept="image/*,video/*"></td></tr>
-            <tr><td class="form-label">Solve: {{ captcha }}</td><td><input type="text" name="captcha" size="6" required> <input type="submit" value="{{ trans('btn_reply') }}"></td></tr>
-        </table>
-    </form>
+    <div style="width: 100%; display: block; margin-top: 25px;">
+        <form method="POST" enctype="multipart/form-data">
+            <table class="post-form">
+                <tr>
+                    <td class="form-label">{{ trans('name') }}</td>
+                    <td class="form-value"><input type="text" name="name" value="Anonymous"></td>
+                </tr>
+                <tr>
+                    <td class="form-label">{{ trans('message') }}</td>
+                    <td class="form-value">
+                        <textarea name="message" required></textarea>
+                    </td>
+                </tr>
+                <tr>
+                    <td class="form-label">{{ trans('file') }}</td>
+                    <td class="form-value"><input type="file" name="file" accept="image/*,video/*"></td>
+                </tr>
+                <tr>
+                    <td class="form-label">Verification</td>
+                    <td class="form-value" style="font-size: 9pt; font-family: sans-serif; color: #000;">
+                        Solve: <b>{{ captcha }}</b> = <input type="text" name="captcha" size="5" style="width:50px; height:20px;" required>
+                        <input type="submit" value="{{ trans('btn_reply') }}" style="height:22px; margin-left:10px;">
+                    </td>
+                </tr>
+            </table>
+        </form>
+    </div>
     {% endblock %}
     """
 
@@ -930,4 +992,4 @@ def setup_templates():
     app.jinja_loader = jinja2.DictLoader({'base': BASE_HTML})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True) # here you can change port if you want
+    app.run(host='0.0.0.0', port=80, debug=True)
